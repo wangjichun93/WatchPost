@@ -1,0 +1,106 @@
+# =====================================================================
+# 望哨 WATCHPOST · 内置采集模板: Oracle (JDBC)
+# 对应 PRD 05「三类数据库监控」; 协议 JDBC, 只读账号
+# 最小权限: SELECT_CATALOG_ROLE + SELECT on V$ 视图
+# 驱动: ojdbc8 (兼容 Oracle 12.1; ojdbc11 不兼容 — PRD 强约束)
+# 只查 V$/DBA 系统视图, 不碰业务表; 查询超时 ≤5s; 连接池按实例隔离
+# ⚠️ 兼容 Oracle 12.1+; 部分 V$ 列名随版本变化, 按实测微调
+# =====================================================================
+app: oracle
+protocol: jdbc
+collectInterval: 30
+timeout: 5
+auth:
+  type: password
+  usernameRef: ${cred.username}
+  secretRef: ${cred.password}
+
+queries:
+  # ---- 会话数 / processes 使用率 ----
+  - group: sessions
+    sql: >
+      SELECT
+        (SELECT COUNT(*) FROM v$session WHERE status='ACTIVE') AS active_sessions,
+        (SELECT TO_NUMBER(value) FROM v$parameter WHERE name='processes') AS processes_limit,
+        ROUND(
+          (SELECT COUNT(*) FROM v$session WHERE status='ACTIVE') * 100.0 /
+          NULLIF((SELECT TO_NUMBER(value) FROM v$parameter WHERE name='processes'), 0), 2
+        ) AS usage_percent
+      FROM dual
+    columnMapping:
+      active_sessions: active_sessions
+      processes_limit: processes_limit
+      usage_percent: usage_percent
+    fields:
+      - { name: usage_percent, type: double, unit: "%" }
+
+  # ---- 表空间使用率 (每表空间一行, 按表空间名打标签) ----
+  - group: tablespace
+    sql: >
+      SELECT
+        df.tablespace_name AS tablespace_name,
+        ROUND((df.total_bytes - NVL(fs.free_bytes, 0)) * 100.0 / df.total_bytes, 2) AS usage_percent
+      FROM
+        (SELECT tablespace_name, SUM(bytes) AS total_bytes
+           FROM dba_data_files GROUP BY tablespace_name) df
+        LEFT JOIN
+        (SELECT tablespace_name, SUM(bytes) AS free_bytes
+           FROM dba_free_space GROUP BY tablespace_name) fs
+        ON df.tablespace_name = fs.tablespace_name
+    columnMapping:
+      tablespace_name: tablespace_name
+      usage_percent: usage_percent
+    fields:
+      - { name: usage_percent, type: double, unit: "%", label: true }
+
+  # ---- SGA / PGA 使用率 ----
+  - group: memory
+    sql: >
+      SELECT
+        ROUND((SELECT SUM(bytes) FROM v$sgastat) * 100.0 /
+          NULLIF((SELECT TO_NUMBER(value) FROM v$parameter WHERE name='sga_max_size'), 0), 2
+        ) AS sga_usage_percent,
+        ROUND((SELECT value FROM v$pgastat WHERE name='total PGA allocated') * 100.0 /
+          NULLIF((SELECT TO_NUMBER(value) FROM v$parameter WHERE name='pga_aggregate_target'), 0), 2
+        ) AS pga_usage_percent
+      FROM dual
+    columnMapping:
+      sga_usage_percent: sga_usage_percent
+      pga_usage_percent: pga_usage_percent
+    fields:
+      - { name: sga_usage_percent, type: double, unit: "%" }
+      - { name: pga_usage_percent, type: double, unit: "%" }
+
+  # ---- Redo 日志切换次数 / 小时 ----
+  - group: redo
+    sql: >
+      SELECT COUNT(*) AS switches_per_hour
+      FROM v$loghist
+      WHERE first_time > SYSDATE - 1/24
+    columnMapping:
+      switches_per_hour: switches_per_hour
+    fields:
+      - { name: switches_per_hour, type: long }
+
+  # ---- 归档目录剩余空间 (FRA 使用率反推剩余%) ----
+  - group: archive
+    sql: >
+      SELECT ROUND(100 - NVL(
+        (SELECT percent_space_used FROM v$flash_recovery_area_usage
+          WHERE file_type='ARCHIVED LOG'), 0), 2) AS free_percent
+      FROM dual
+    columnMapping:
+      free_percent: free_percent
+    fields:
+      - { name: free_percent, type: double, unit: "%" }
+
+  # ---- Top 等待事件平均等待 (ms; 排除空闲事件) ----
+  - group: waits
+    sql: >
+      SELECT ROUND(MAX(average_wait) * 10, 2) AS top_avg_wait_ms
+      FROM v$system_event
+      WHERE wait_class <> 'Idle'
+    columnMapping:
+      top_avg_wait_ms: top_avg_wait_ms
+    fields:
+      - { name: top_avg_wait_ms, type: double, unit: ms }

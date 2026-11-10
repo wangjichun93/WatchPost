@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8"/>
+    <title>望哨告警</title>
+</head>
+<body style="margin:0;padding:0;background:#f4f5f7;font-family:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,'PingFang SC','Microsoft YaHei',sans-serif;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+    <tr>
+        <td align="center">
+            <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e6eb;">
+                <!-- 头部 -->
+                <tr>
+                    <td style="padding:20px 24px;background:#1d2129;color:#ffffff;">
+                        <span style="font-size:18px;font-weight:600;">望哨 WATCHPOST</span>
+                        <span th:if="${isRecovery}" style="float:right;background:#00b42a;color:#fff;padding:2px 10px;border-radius:12px;font-size:13px;">已恢复</span>
+                        <span th:unless="${isRecovery}" style="float:right;background:#f53f3f;color:#fff;padding:2px 10px;border-radius:12px;font-size:13px;" th:text="'[' + ${severity} + ']'">[严重]</span>
+                    </td>
+                </tr>
+                <!-- 标题 -->
+                <tr>
+                    <td style="padding:20px 24px 8px;">
+                        <h2 style="margin:0;font-size:17px;color:#1d2129;">
+                            <span th:text="${monitorName}">prod-mysql-01</span>
+                            · <span th:text="${metricGroup} + '.' + ${fieldName}">replication.seconds_behind_master</span>
+                            <span th:if="${isRecovery}" style="color:#00b42a;"> 已恢复正常</span>
+                            <span th:unless="${isRecovery}" style="color:#f53f3f;"> 越限告警</span>
+                        </h2>
+                    </td>
+                </tr>
+                <!-- 详情表 -->
+                <tr>
+                    <td style="padding:8px 24px 16px;">
+                        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-size:14px;color:#4e5969;">
+                            <tr><td style="padding:6px 0;width:120px;color:#86909c;">监控对象</td>
+                                <td style="padding:6px 0;" th:text="${monitorName} + ' / ' + ${appType}">prod-mysql-01 / MySQL</td></tr>
+                            <tr><td style="padding:6px 0;color:#86909c;">指标字段</td>
+                                <td style="padding:6px 0;" th:text="${metricGroup} + '.' + ${fieldName}">replication.seconds_behind_master</td></tr>
+                            <tr><td style="padding:6px 0;color:#86909c;">当前值</td>
+                                <td style="padding:6px 0;font-weight:600;color:#1d2129;">
+                                    <span th:text="${currentValue}">47</span> <span th:text="${unit}">s</span>
+                                    <span style="color:#86909c;font-weight:400;"> 阈值 </span>
+                                    <span th:text="${thresholdDesc}">≥ 30 s</span>
+                                </td></tr>
+                            <tr><td style="padding:6px 0;color:#86909c;">连续命中</td>
+                                <td style="padding:6px 0;" th:text="${hitCount} + ' 次 / 窗口 ' + ${windowMin} + ' min'">3 次 / 窗口 5 min</td></tr>
+                            <tr><td style="padding:6px 0;color:#86909c;">首次触发</td>
+                                <td style="padding:6px 0;" th:text="${firstTrigger}">2026-11-10 09:14:22</td></tr>
+                            <tr><td style="padding:6px 0;color:#86909c;">告警级别</td>
+                                <td style="padding:6px 0;" th:text="${severity} + '  策略组 ' + ${groupName}">严重  策略组 数据库值班</td></tr>
+                        </table>
+                    </td>
+                </tr>
+                <!-- 操作按钮 -->
+                <tr>
+                    <td style="padding:0 24px 20px;">
+                        <a th:href="${detailUrl}" style="display:inline-block;background:#165dff;color:#fff;text-decoration:none;padding:8px 18px;border-radius:4px;font-size:14px;margin-right:12px;">查看详情</a>
+                        <a th:if="${!isRecovery}" th:href="${silenceUrl}" style="display:inline-block;background:#ffffff;color:#4e5969;text-decoration:none;padding:8px 18px;border-radius:4px;font-size:14px;border:1px solid #c9cdd4;">静默 1h</a>
+                    </td>
+                </tr>
+                <!-- 页脚 -->
+                <tr>
+                    <td style="padding:14px 24px;background:#f7f8fa;color:#86909c;font-size:12px;border-top:1px solid #e5e6eb;">
+                        本邮件由望哨 WATCHPOST 自动发送 · 告警编号 <span th:text="${alertNo}">A-2317</span> · 请勿直接回复
+                    </td>
+                </tr>
+            </table>
+        </td>
+    </tr>
+</table>
+</body>
+</html>

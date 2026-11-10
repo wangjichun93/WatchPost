@@ -1,0 +1,91 @@
+# =====================================================================
+# 望哨 WATCHPOST · 内置采集模板: PostgreSQL (JDBC)
+# 对应 PRD 05「三类数据库监控」; 协议 JDBC, 只读账号
+# 最小权限: pg_monitor 角色 + SELECT on pg_stat_* 视图
+# 只查系统/性能视图, 不碰业务表; 查询超时 ≤5s; 连接池按实例隔离
+# ⚠️ 兼容 PG 10+; 复制延迟函数名随版本略有差异 (pg_last_xact_replay_timestamp)
+# =====================================================================
+app: postgresql
+protocol: jdbc
+collectInterval: 30
+timeout: 5
+auth:
+  type: password
+  usernameRef: ${cred.username}
+  secretRef: ${cred.password}
+
+queries:
+  # ---- 活跃连接 / max_connections 使用率 ----
+  - group: connections
+    sql: >
+      SELECT
+        (SELECT count(*) FROM pg_stat_activity) AS active_connections,
+        (SELECT setting::int FROM pg_settings WHERE name='max_connections') AS max_connections,
+        ROUND(
+          (SELECT count(*) FROM pg_stat_activity) * 100.0 /
+          NULLIF((SELECT setting::int FROM pg_settings WHERE name='max_connections'), 0), 2
+        ) AS usage_percent
+    columnMapping:
+      active_connections: active_connections
+      max_connections: max_connections
+      usage_percent: usage_percent
+    fields:
+      - { name: usage_percent, type: double, unit: "%" }
+
+  # ---- 缓存命中率 (blks_hit / (blks_hit + blks_read)) ----
+  - group: cache
+    sql: >
+      SELECT ROUND(
+        SUM(blks_hit) * 100.0 / NULLIF(SUM(blks_hit) + SUM(blks_read), 0), 2
+      ) AS hit_rate
+      FROM pg_stat_database
+    columnMapping:
+      hit_rate: hit_rate
+    fields:
+      - { name: hit_rate, type: double, unit: "%" }
+
+  # ---- 死元组数 (单表最大; n_dead_tup) ----
+  - group: tables
+    sql: >
+      SELECT COALESCE(MAX(n_dead_tup), 0) AS dead_tuples
+      FROM pg_stat_user_tables
+    columnMapping:
+      dead_tuples: dead_tuples
+    fields:
+      - { name: dead_tuples, type: long }
+
+  # ---- 流复制延迟 (秒; 备库生效, 主库为0/NULL) ----
+  - group: replication
+    sql: >
+      SELECT COALESCE(
+        EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())), 0
+      ) AS lag_sec
+    columnMapping:
+      lag_sec: lag_sec
+    fields:
+      - { name: lag_sec, type: double, unit: s }
+
+  # ---- 最长事务 / 最长锁等待 (秒) ----
+  - group: transactions
+    sql: >
+      SELECT
+        COALESCE(MAX(EXTRACT(EPOCH FROM (now() - xact_start))), 0) AS max_duration_sec
+      FROM pg_stat_activity
+      WHERE xact_start IS NOT NULL
+        AND state <> 'idle'
+    columnMapping:
+      max_duration_sec: max_duration_sec
+    fields:
+      - { name: max_duration_sec, type: double, unit: s }
+
+  # ---- 事务回滚率 (rollback / (commit + rollback)) ----
+  - group: transactions
+    sql: >
+      SELECT ROUND(
+        SUM(xact_rollback) * 100.0 / NULLIF(SUM(xact_commit) + SUM(xact_rollback), 0), 2
+      ) AS rollback_rate
+      FROM pg_stat_database
+    columnMapping:
+      rollback_rate: rollback_rate
+    fields:
+      - { name: rollback_rate, type: double, unit: "%" }

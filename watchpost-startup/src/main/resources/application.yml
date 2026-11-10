@@ -1,0 +1,180 @@
+# =====================================================================
+# 望哨 WATCHPOST · 无 Agent 实时监控系统 — 应用配置 (v1 单机)
+# 对应《系统架构设计 v1.0》; 敏感项用环境变量注入, 不落明文
+# =====================================================================
+server:
+  port: ${WATCHPOST_PORT:1157}
+  servlet:
+    encoding:
+      charset: UTF-8
+      force: true
+  # 虚拟线程: 采集/Web I/O 受益 (Java 21)
+  # 注意: Tomcat 请求处理用平台线程; 采集并发由 CollectScheduler 的虚拟线程执行器承载
+
+spring:
+  application:
+    name: watchpost
+  main:
+    banner-mode: off
+  # ---- 关系库: PostgreSQL 16 (元数据/告警/审计) ----
+  datasource:
+    # stringtype=unspecified: 让 PG 驱动把 String 参数以 unknown 类型发送,
+    # 由服务端强制转换为原生 enum 列 (否则 @Enumerated(STRING) 写入 enum 列报错)
+    url: ${WP_DB_URL:jdbc:postgresql://localhost:5432/watchpost?stringtype=unspecified}
+    username: ${WP_DB_USER:watchpost}
+    password: ${WP_DB_PASSWORD:watchpost}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      pool-name: wp-meta-pool
+  jpa:
+    hibernate:
+      # 表结构由 Flyway 全权管理; DDL 用原生 int2/enum, 与 JPA 的 Integer/String
+      # 映射在严格 validate 下会误报类型不符, 故用 none (运行时读写正常)。
+      ddl-auto: ${WP_JPA_DDL_AUTO:none}
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          time_zone: UTC
+  # ---- Flyway 迁移 (V1__init_schema, V2__seed_data) ----
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+  # ---- Redis 7 (实时值/收敛状态/限流/登录锁定/验证码) ----
+  data:
+    redis:
+      host: ${WP_REDIS_HOST:localhost}
+      port: ${WP_REDIS_PORT:6379}
+      password: ${WP_REDIS_PASSWORD:}
+      database: 0
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+  # ---- 邮件 (Spring Mail 默认 sender 由 wp_smtp_config 动态覆盖) ----
+  mail:
+    host: ${WP_MAIL_HOST:localhost}
+    port: ${WP_MAIL_PORT:465}
+    username: ${WP_MAIL_USER:}
+    password: ${WP_MAIL_PASSWORD:}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+  thymeleaf:
+    cache: false
+    prefix: classpath:/templates/
+    suffix: .html
+    mode: HTML
+    encoding: UTF-8
+
+# =====================================================================
+# 望哨业务配置
+# =====================================================================
+watchpost:
+  # ---- 安全 ----
+  security:
+    jwt:
+      # 生产务必用环境变量/KMS 注入 (>=32字节); 此为本地默认, 启动会告警
+      secret: ${WP_JWT_SECRET:watchpost-default-dev-secret-change-me-in-production-0123456789}
+      access-ttl-sec: 7200        # 访问令牌 2h
+      refresh-ttl-sec: 604800     # 刷新令牌 7d (记住我)
+      issuer: watchpost
+  # ---- 凭据加密主密钥 (AES-256-GCM); 生产用 KMS/环境注入, 不落库 ----
+  crypto:
+    master-key: ${WP_CRYPTO_KEY:watchpost-default-crypto-key-change-me}
+  # ---- 首次启动引导 ----
+  bootstrap:
+    admin-username: ${WP_ADMIN_USER:admin}
+    admin-password: ${WP_ADMIN_PASSWORD:admin123}
+  # ---- 邮件链接基址 (告警详情/静默链接) ----
+  mail:
+    base-url: ${WP_MAIL_BASE_URL:http://localhost:1157}
+  # ---- 通知渠道 ----
+  notify:
+    webhook:
+      enabled: ${WP_WEBHOOK_ENABLED:false}   # PRD: Webhook 预留 (IM/短信不在 v1)
+      urls: ${WP_WEBHOOK_URLS:}              # 逗号分隔的 webhook 接收地址
+      secret: ${WP_WEBHOOK_SECRET:}          # 可选: HMAC-SHA256 签名密钥 (X-Watchpost-Signature)
+      timeout-ms: 5000
+
+# =====================================================================
+# 采集器配置 (collector.*)
+# =====================================================================
+collector:
+  enabled: true                   # v1 单机启用采集调度; 集群期 manager 可置 false
+  default-timeout-ms: 5000        # PRD: 采集超时 ≤5s
+  scheduler-threads: 2            # 周期触发线程 (轻量, 仅派发)
+  default-bulkhead: 32            # 默认协议舱壁并发上限
+  unreachable-threshold: 2        # 连续失败2次标记不可达
+  virtual-thread-prefix: collect-
+  bulkhead:                       # 各协议舱壁并发上限 (重连接协议调低)
+    ssh: 16
+    jdbc: 16
+    http: 64
+    snmp: 32
+    ipmi: 8                       # BMC 处理能力弱, 并发 ≤8
+
+# =====================================================================
+# 存储配置 (warehouse.*)
+# =====================================================================
+warehouse:
+  store:
+    type: jpa                     # 时序存储: jpa(默认单机) | iotdb(生产可插拔)
+  queue:
+    type: memory                  # 指标队列: memory(默认单进程) | redis | kafka(集群)
+  # IoTDB (warehouse.store.type=iotdb 时生效)
+  iotdb:
+    host: ${WP_IOTDB_HOST:127.0.0.1}
+    port: 6667
+    user: root
+    password: root
+    database: watchpost
+  # 历史数据保留 (PRD: 30天可配)
+  retention-days: 30
+
+# =====================================================================
+# 平台自监控 (Actuator + Prometheus)
+# =====================================================================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when-authorized
+  health:
+    # SMTP 由 wp_smtp_config 动态配置(非 spring.mail.*), 关闭 Actuator 邮件健康指示器,
+    # 否则每次 /actuator/health 都尝试连默认 localhost:465 失败 → 健康态误报 DOWN。
+    mail:
+      enabled: false
+  metrics:
+    tags:
+      application: watchpost
+
+# =====================================================================
+# API 文档 (springdoc)
+# =====================================================================
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+
+# =====================================================================
+# 日志 (脱敏由 MaskUtil + 业务层保证; 此处不打印敏感参数)
+# =====================================================================
+logging:
+  level:
+    root: INFO
+    com.watchpost: INFO
+    org.hibernate.SQL: WARN
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"

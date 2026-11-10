@@ -1,0 +1,37 @@
+# =====================================================================
+# 望哨 WATCHPOST · 内置采集模板: HTTP(S) 应用 API 嗅探
+# 对应 PRD 03「应用程序 API 嗅探」; 协议 HTTP, 主动探测
+# 采集: 可用性/响应耗时/5xx/JSONPath断言/SSL证书剩余天数/分段耗时/关键字/响应大小
+# 分段耗时 (dns/connect/ttfb) 由 OkHttp EventListener 采集, 无需模板声明命令
+# =====================================================================
+app: http
+protocol: http
+collectInterval: 30
+timeout: 5
+auth:
+  type: token                 # none | token | basic
+  tokenRef: ${cred.token}     # 注入到 headers 的 ${cred.token} 占位
+
+request:
+  method: GET
+  url: ${endpoint}            # 实例接入时填写完整 URL (含 scheme)
+  headers:
+    Accept: "application/json"
+    # Authorization: "Bearer ${cred.token}"   # 按需启用
+  expectStatus: [200, 201, 204]
+
+checks:
+  sslCertDays: true           # 采集 SSL 证书剩余天数 (https 生效)
+  jsonPathAssert:             # JSONPath 断言 (Jayway JsonPath)
+    - path: "$.status"
+      expect: "UP"
+  bodyKeyword: "ok"           # 响应体关键字 (缺失则 body_keyword_missing=1)
+  baselineSizeRatio: 3        # 响应大小 ≥3倍基线告警 (size_ratio)
+
+timingPhases: [dns, connect, ttfb]   # 分段耗时采集开关
+
+# 说明: HTTP 采集器直接产出以下字段 (无需 command/parser):
+#   api.status_code / api.available / api.response_ms / api.status_5xx / api.body_size
+#   api.dns_ms / api.connect_ms / api.ttfb_ms / api.ssl_cert_days
+#   api.json_assert_pass / api.json_assert_fail / api.body_keyword_missing
+# 阈值规则 (PRD 出厂默认) 绑定到上述字段, 见 V2__seed_data.sql

@@ -1,0 +1,15 @@
+# 构建上下文忽略 (减小镜像构建上下文)
+**/target/
+**/*.iml
+**/.idea/
+**/.vscode/
+.git/
+.gitignore
+docs/
+deploy/.env
+deploy/server/.env
+**/*.log
+web-app/node_modules/
+# 注意: 不排除 web-app/dist —— 服务器瘦镜像 (deploy/server/Dockerfile.frontend)
+# 直接 COPY 预构建 dist; 多阶段构建 (deploy/Dockerfile.frontend) 会在镜像内重新
+# 构建并覆盖 dist, 故保留 dist 在上下文中对两者均无害。

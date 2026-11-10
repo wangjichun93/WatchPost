@@ -1,0 +1,98 @@
+# =====================================================================
+# 望哨 WATCHPOST · 内置采集模板: MySQL (JDBC)
+# 对应 PRD 05「三类数据库监控」; 协议 JDBC, 只读账号
+# 最小权限: SELECT on performance_schema + REPLICATION CLIENT
+# 只查系统/性能视图, 不碰业务表; 查询超时 ≤5s; 连接池按实例隔离
+# columnMapping: 结果列(小写) -> 标准字段名; 非空时仅保留映射列
+# ⚠️ 兼容 MySQL 5.7+; 8.0 部分视图列名有差异, 按实测微调 SQL
+# =====================================================================
+app: mysql
+protocol: jdbc
+collectInterval: 30
+timeout: 5
+auth:
+  type: password
+  usernameRef: ${cred.username}
+  secretRef: ${cred.password}
+
+queries:
+  # ---- 连接数 / max_connections 使用率 ----
+  - group: connections
+    sql: >
+      SELECT
+        (SELECT VARIABLE_VALUE FROM performance_schema.global_status
+          WHERE VARIABLE_NAME='Threads_connected') AS threads_connected,
+        (SELECT VARIABLE_VALUE FROM performance_schema.global_variables
+          WHERE VARIABLE_NAME='max_connections') AS max_connections,
+        ROUND(
+          (SELECT VARIABLE_VALUE FROM performance_schema.global_status
+            WHERE VARIABLE_NAME='Threads_connected') * 100.0 /
+          NULLIF((SELECT VARIABLE_VALUE FROM performance_schema.global_variables
+            WHERE VARIABLE_NAME='max_connections'), 0), 2) AS usage_percent
+    columnMapping:
+      threads_connected: threads_connected
+      max_connections: max_connections
+      usage_percent: usage_percent
+    fields:
+      - { name: usage_percent, type: double, unit: "%" }
+
+  # ---- QPS/TPS (对比5min基线由规则层 DELTA_PCT 计算) ----
+  - group: throughput
+    sql: >
+      SELECT
+        (SELECT VARIABLE_VALUE FROM performance_schema.global_status
+          WHERE VARIABLE_NAME='Questions') AS questions,
+        (SELECT VARIABLE_VALUE FROM performance_schema.global_status
+          WHERE VARIABLE_NAME='Com_commit') AS com_commit,
+        (SELECT VARIABLE_VALUE FROM performance_schema.global_status
+          WHERE VARIABLE_NAME='Com_rollback') AS com_rollback
+    columnMapping:
+      questions: questions
+      com_commit: com_commit
+      com_rollback: com_rollback
+    fields:
+      - { name: questions, type: long }
+
+  # ---- 慢查询数 (累计值; 每分钟速率由规则层窗口差分) ----
+  - group: queries
+    sql: >
+      SELECT VARIABLE_VALUE AS slow_per_min
+      FROM performance_schema.global_status
+      WHERE VARIABLE_NAME='Slow_queries'
+    columnMapping:
+      slow_per_min: slow_per_min
+    fields:
+      - { name: slow_per_min, type: long }
+
+  # ---- InnoDB Buffer Pool 命中率 ----
+  - group: innodb
+    sql: >
+      SELECT ROUND(
+        (1 - (SELECT VARIABLE_VALUE FROM performance_schema.global_status
+               WHERE VARIABLE_NAME='Innodb_buffer_pool_reads') * 1.0 /
+             NULLIF((SELECT VARIABLE_VALUE FROM performance_schema.global_status
+               WHERE VARIABLE_NAME='Innodb_buffer_pool_read_requests'), 0)
+        ) * 100, 2) AS buffer_pool_hit_rate
+    columnMapping:
+      buffer_pool_hit_rate: buffer_pool_hit_rate
+    fields:
+      - { name: buffer_pool_hit_rate, type: double, unit: "%" }
+
+  # ---- 主从延迟 Seconds_Behind_Master (REPLICATION CLIENT 权限) ----
+  - group: replication
+    sql: "SHOW SLAVE STATUS"
+    columnMapping:
+      seconds_behind_master: seconds_behind_master
+    fields:
+      - { name: seconds_behind_master, type: long, unit: s }
+
+  # ---- 锁等待 / MDL 等待 (最大等待秒数) ----
+  - group: locks
+    sql: >
+      SELECT COALESCE(MAX(TIMER_WAIT/1000000000000), 0) AS max_wait_sec
+      FROM performance_schema.events_waits_current
+      WHERE EVENT_NAME LIKE 'wait/lock%'
+    columnMapping:
+      max_wait_sec: max_wait_sec
+    fields:
+      - { name: max_wait_sec, type: double, unit: s }

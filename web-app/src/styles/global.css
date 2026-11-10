@@ -1,0 +1,49 @@
+/* 望哨 WATCHPOST · 全局样式 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #f4f5f7;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #c9cdd4;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #86909c;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 活动告警行高亮 (值班视图) */
+.alert-row-active {
+  background: #fff3f0 !important;
+}
+.alert-row-active:hover > td {
+  background: #ffece8 !important;
+}
+
+/* AntD 表格内联统计卡紧凑化 */
+.ant-statistic-title {
+  margin-bottom: 2px;
+}

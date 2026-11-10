@@ -1,0 +1,43 @@
+# ---- Maven ----
+target/
+!.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+release.properties
+
+# ---- IDE ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+
+# ---- 密钥与环境 (切勿提交) ----
+deploy/.env
+*.pem
+*.key
+*.p12
+*.jks
+
+# ---- 日志 ----
+*.log
+logs/
+
+# ---- 前端 ----
+web-app/node_modules/
+web-app/dist/
+web-app/.pnpm-store/
+*.tsbuildinfo
+
+# ---- 本地数据 ----
+data/
+*.duckdb

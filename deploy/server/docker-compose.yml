@@ -1,0 +1,123 @@
+# =====================================================================
+# 望哨 WATCHPOST · 服务器部署 compose (192.168.31.86, Rocky Linux 9)
+# 设计约束:
+#   - 与现有 Dify 生产栈完全隔离: 独立 project name / network / volumes / 容器名
+#   - 端口避让: 80/443/6379 已占用 → 前端发布 11580, 后端 1157; db/redis 不发布宿主端口
+#   - 复用服务器本地镜像: postgres:15-alpine / redis:7.4 / nginx:1.27-alpine / eclipse-temurin:21-jre-alpine
+#   - 瘦镜像: 直接 COPY 预构建 jar 与 dist, 不在服务器跑 Maven/npm (磁盘仅 8.4G 可用)
+#   - 内存受限: 服务器可用 ~4G, 显式 -Xmx + mem_limit, 避免挤占 Dify
+#   - 时序库用 JPA 落盘 (warehouse.store.type=jpa), 不启 IoTDB 以省磁盘/内存
+# 部署位置: /data/apps/WatchPost/deploy/server/docker-compose.yml
+# 构建上下文 ../.. = /data/apps/WatchPost (含 watchpost.jar 与 web-app/dist)
+# 启动: cd /data/apps/WatchPost && docker compose -f deploy/server/docker-compose.yml up -d --build
+# =====================================================================
+name: watchpost
+
+services:
+  # ---- 关系库 (复用本地 postgres:15-alpine; 不发布宿主端口, 仅内网) ----
+  db:
+    image: postgres:15-alpine
+    container_name: watchpost-db
+    environment:
+      POSTGRES_DB: watchpost
+      POSTGRES_USER: watchpost
+      POSTGRES_PASSWORD: ${WP_DB_PASSWORD}
+      TZ: Asia/Shanghai
+    volumes:
+      - watchpost_pgdata:/var/lib/postgresql/data
+    networks: [watchpost_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watchpost -d watchpost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+    restart: unless-stopped
+
+  # ---- Redis (复用本地 redis:7.4; 不发布宿主端口, 仅内网) ----
+  redis:
+    image: redis:7.4
+    container_name: watchpost-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - watchpost_redisdata:/data
+    networks: [watchpost_net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 320m
+    restart: unless-stopped
+
+  # ---- 后端 (瘦镜像: COPY 预构建 watchpost.jar) ----
+  app:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile.backend
+    image: watchpost-app:1.0.0
+    container_name: watchpost-app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # stringtype=unspecified: String 参数以 unknown 类型发送, 服务端强转原生 enum 列
+      WP_DB_URL: jdbc:postgresql://db:5432/watchpost?stringtype=unspecified
+      WP_DB_USER: watchpost
+      WP_DB_PASSWORD: ${WP_DB_PASSWORD}
+      # Flyway 管理表结构; DDL 用原生 int2/enum, 关闭 Hibernate 严格 validate (否则误报类型不符)
+      SPRING_JPA_HIBERNATE_DDL_AUTO: none
+      WP_REDIS_HOST: redis
+      WP_REDIS_PORT: 6379
+      WP_JWT_SECRET: ${WP_JWT_SECRET}
+      WP_CRYPTO_KEY: ${WP_CRYPTO_KEY}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-admin}
+      WP_ADMIN_PASSWORD: ${WP_ADMIN_PASSWORD}
+      WP_STORE_TYPE: jpa
+      WP_QUEUE_TYPE: memory
+      WP_MAIL_BASE_URL: ${WP_MAIL_BASE_URL:-http://192.168.31.86:11580}
+      # SMTP 由 wp_smtp_config 动态配置, 关闭 Actuator 邮件健康指示器 (否则误报 DOWN)
+      MANAGEMENT_HEALTH_MAIL_ENABLED: "false"
+      TZ: Asia/Shanghai
+      # 显式堆上限, 避免 MaxRAMPercentage 按宿主内存(9.4G)误算挤占 Dify
+      JAVA_OPTS: "-Xms256m -Xmx768m -XX:+UseContainerSupport"
+    ports:
+      - "1157:1157"          # 直连 API / Swagger (1157 空闲)
+    networks: [watchpost_net]
+    mem_limit: 1g
+    restart: unless-stopped
+
+  # ---- 前端 (瘦镜像: nginx 服务预构建 dist + 反代 /api /ws) ----
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile.frontend
+    image: watchpost-web:1.0.0
+    container_name: watchpost-web
+    depends_on:
+      - app
+    ports:
+      - "11580:80"           # 前端入口 (80/443 被 Dify 占用, 改用 11580)
+    networks: [watchpost_net]
+    # 健康检查用 127.0.0.1 (nginx 仅监听 IPv4; alpine 内 localhost 优先解析 IPv6 ::1 会拒连)
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/nginx-health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: 128m
+    restart: unless-stopped
+
+networks:
+  watchpost_net:
+    name: watchpost_net
+    driver: bridge
+
+volumes:
+  watchpost_pgdata:
+    name: watchpost_pgdata
+  watchpost_redisdata:
+    name: watchpost_redisdata

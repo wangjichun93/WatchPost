@@ -1,0 +1,123 @@
+# =====================================================================
+# 望哨 WATCHPOST · 内置采集模板: Linux 服务器 (SSH)
+# 对应 PRD 03「服务器指标」; 协议 SSH, 只读命令白名单
+# 解析器: line(单行取列) / awk(首行按列) / table(多行按列, keyBy 打标签)
+# 字段 expr 用 JEXL, 可引用列变量 c1..cn (1-based) 做单位换算
+# ⚠️ 列位置/命令输出格式随发行版与工具版本略有差异, 接入时按实测微调
+# =====================================================================
+app: linux
+protocol: ssh
+collectInterval: 30
+timeout: 5
+auth:
+  type: password            # password | key (key 认证 M1+ 预留)
+  usernameRef: ${cred.username}
+  secretRef: ${cred.password}
+
+metrics:
+  # ---- CPU 使用率: vmstat 采样1秒取末行, idle=第15列, usage=100-idle ----
+  - group: cpu
+    command: "vmstat 1 2 | tail -1"
+    parser: awk
+    fields:
+      - name: usage_percent
+        type: double
+        unit: "%"
+        expr: "100 - c15"          # c15=idle
+      - name: user_percent
+        type: double
+        unit: "%"
+        expr: "c13"                # c13=us
+      - name: system_percent
+        type: double
+        unit: "%"
+        expr: "c14"                # c14=sy
+      - name: iowait_percent
+        type: double
+        unit: "%"
+        expr: "c16"                # c16=wa
+
+  # ---- 内存使用率: free -m 取 Mem 行, (total-available)/total*100 ----
+  - group: memory
+    command: "free -m | grep Mem"
+    parser: awk
+    fields:
+      - name: usage_percent
+        type: double
+        unit: "%"
+        expr: "(c2 - c7) / c2 * 100"   # c2=total c7=available
+      - name: total_mb
+        type: long
+        unit: MB
+        expr: "c2"
+      - name: available_mb
+        type: long
+        unit: MB
+        expr: "c7"
+
+  # ---- 磁盘分区使用率: df -P 每分区一行, 第5列 Capacity, 按设备打标签 ----
+  - group: disk
+    command: "df -P"
+    parser: table
+    keyBy: device                 # 标签维度=设备名 (cols[0])
+    fields:
+      - name: usage_percent
+        type: double
+        unit: "%"
+        column: 5                   # Capacity 列 (含%, 解析自动 strip)
+        label: false
+      - name: available_kb
+        type: long
+        unit: KB
+        column: 4
+
+  # ---- 系统负载: /proc/loadavg 首行三列 ----
+  # 说明: PRD 阈值为 load1/核数; 核数随机型变化, 建议按实例覆写规则或
+  #       用 expr 归一化 (需将 nproc 并入命令, 受只读白名单限制此处取原始 load1)
+  - group: load
+    command: "cat /proc/loadavg"
+    parser: line
+    fields:
+      - name: load1
+        type: double
+        expr: "c1"
+      - name: load5
+        type: double
+        expr: "c2"
+      - name: load15
+        type: double
+        expr: "c3"
+
+  # ---- 磁盘 IO await: iostat -x 采样1秒 ----
+  # ⚠️ await 列位置随 sysstat 版本变化 (常见第10列), 接入时按 `iostat -x` 实测调整 column
+  - group: io
+    command: "iostat -x 1 2 | tail -1"
+    parser: awk
+    fields:
+      - name: await_ms
+        type: double
+        unit: ms
+        expr: "c10"
+      - name: util_percent
+        type: double
+        unit: "%"
+        expr: "c14"
+
+  # ---- TCP 已建立连接数: ss 统计 established ----
+  - group: tcp
+    command: "ss -tan state established | wc -l"
+    parser: line
+    fields:
+      - name: established
+        type: long
+        expr: "c1"
+
+  # ---- 关键进程存活数: pgrep -c 计数 ----
+  # ⚠️ 进程名 (sshd) 为示例默认; 实例接入时按实际关键进程覆写命令/规则
+  - group: process
+    command: "pgrep -c -f sshd"
+    parser: line
+    fields:
+      - name: alive_count
+        type: int
+        expr: "c1"

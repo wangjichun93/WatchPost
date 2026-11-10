@@ -1,0 +1,1064 @@
+openapi: 3.0.3
+info:
+  title: 望哨 WATCHPOST API
+  description: |
+    无 Agent 实时监控系统 · REST API 契约 (v1.0)。
+
+    **认证**: 除 `/api/auth/login`、`/api/auth/captcha`、`/api/auth/refresh` 外, 全部端点需 `Authorization: Bearer <JWT>`。
+
+    **RBAC 路由权限矩阵** (PRD 第06章):
+    | 路由前缀 | 权限 |
+    |---|---|
+    | /api/auth/login, /captcha, /refresh | 公开 |
+    | /api/dashboard, /api/alerts, /api/monitors/{id}/realtime | 全部角色 (ADMIN/OPERATOR/READONLY) |
+    | /api/monitors (写), /api/alert-rules (写) | ADMIN·OPERATOR |
+    | /api/notifications, /api/settings, /api/audit | 仅 ADMIN |
+
+    **统一响应包络**: 所有响应为 `ApiResult<T>` = `{code, message, data, timestamp}`; code=0 成功, 非0 业务错误码。
+
+    **实时推送**: 大盘/详情页实时指标与告警经 WebSocket `ws://host/ws/realtime` 推送 (非 REST, 见架构设计 §11)。
+  version: v1.0
+  license:
+    name: Apache 2.0
+
+servers:
+  - url: http://localhost:1157
+    description: 本地单机 (Docker Compose 默认)
+
+tags:
+  - name: 认证
+    description: 登录/登出/验证码/令牌刷新 (PRD 08)
+  - name: 监控中心
+    description: 监控对象增删改查 + 连通性预检 + 实时值 (PRD 06 /monitors)
+  - name: 总览大盘
+    description: 分类统计 + 告警级别分布 (PRD 06 /dashboard)
+  - name: 告警中心
+    description: 告警查询 + 确认 + 静默 + 关闭 (PRD 06 /alerts)
+  - name: 阈值规则
+    description: 逐指标阈值配置 + 默认模板 (PRD 06 /alert-rules)
+  - name: 通知管理
+    description: 收件人组 + 通知策略 + 测试邮件 (PRD 06 /notifications)
+  - name: 系统设置
+    description: SMTP + 采集器 + 用户与角色 (PRD 06 /settings)
+  - name: 审计日志
+    description: 登录与配置变更全量审计 (PRD 06 /audit)
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ==================== 认证 ====================
+  /api/auth/login:
+    post:
+      tags: [认证]
+      summary: 登录
+      description: 用户名/工号 + 口令 + 验证码; 连续5次失败锁定15分钟 (PRD 07)。全量审计。
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultLoginResponse' }
+        '401':
+          description: 账号或密码错误 / 账号锁定 / 验证码错误
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/auth/captcha:
+    get:
+      tags: [认证]
+      summary: 获取验证码
+      description: 失败≥2次后要求; 返回 key + 图形 (骨架返回码值供联调, 生产返回 base64 图片)。
+      security: []
+      responses:
+        '200':
+          description: 验证码
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          key: { type: string, description: 验证码键 (回传登录) }
+                          code: { type: string, description: 码值 (骨架联调用) }
+
+  /api/auth/refresh:
+    post:
+      tags: [认证]
+      summary: 刷新令牌
+      description: "记住我: 7天内免登录 (PRD 08)。"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: 新访问令牌
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultLoginResponse' }
+
+  /api/auth/logout:
+    post:
+      tags: [认证]
+      summary: 登出
+      responses:
+        '200':
+          description: 已登出
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/auth/me:
+    get:
+      tags: [认证]
+      summary: 当前用户信息
+      responses:
+        '200':
+          description: 用户信息
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/UserInfo' }
+
+  # ==================== 监控中心 ====================
+  /api/monitors:
+    get:
+      tags: [监控中心]
+      summary: 分页查询监控对象
+      parameters:
+        - { name: appType, in: query, schema: { type: string, enum: [linux, http, mysql, postgresql, oracle] } }
+        - { name: status, in: query, schema: { type: integer, description: '0停用 1正常 2不可达' } }
+        - { name: keyword, in: query, schema: { type: string, description: 名称/主机模糊匹配 } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: size, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: 分页结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PageResultMonitorView' }
+    post:
+      tags: [监控中心]
+      summary: 新增监控对象
+      description: 先连通性预检, 失败不落库 (PRD 03)。凭据 AES-256-GCM 加密存储。保存即热调度。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MonitorRequest' }
+      responses:
+        '200':
+          description: 创建成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultMonitorView' }
+        '400':
+          description: 连通性预检失败 (MONITOR_PRECHECK_FAILED)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/monitors/{id}:
+    get:
+      tags: [监控中心]
+      summary: 监控详情
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultMonitorView' }
+    put:
+      tags: [监控中心]
+      summary: 编辑监控对象
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MonitorRequest' }
+      responses:
+        '200':
+          description: 更新成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultMonitorView' }
+    delete:
+      tags: [监控中心]
+      summary: 删除监控对象 (软删除)
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/monitors/{id}/toggle:
+    put:
+      tags: [监控中心]
+      summary: 启用/停用
+      parameters:
+        - { $ref: '#/components/parameters/IdPath' }
+        - { name: enabled, in: query, required: true, schema: { type: boolean } }
+      responses:
+        '200':
+          description: 已切换
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultMonitorView' }
+
+  /api/monitors/{id}/collect:
+    post:
+      tags: [监控中心]
+      summary: 立即采集一次 (详情页手动刷新)
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 已触发
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/monitors/{id}/realtime:
+    get:
+      tags: [监控中心]
+      summary: 实时指标值 (详情页指标卡, 秒级读 Redis)
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 最新值快照 (key = group#field 或 group#field#labels)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        additionalProperties: { $ref: '#/components/schemas/Latest' }
+
+  /api/monitors/{id}/history:
+    get:
+      tags: [监控中心]
+      summary: 历史趋势 (详情页趋势图, TSDB 降采样查询)
+      parameters:
+        - { $ref: '#/components/parameters/IdPath' }
+        - { name: group, in: query, required: true, schema: { type: string }, description: 指标组 }
+        - { name: field, in: query, required: true, schema: { type: string }, description: 字段名 }
+        - { name: from, in: query, required: true, schema: { type: integer, format: int64 }, description: 起始 epoch millis }
+        - { name: to, in: query, required: true, schema: { type: integer, format: int64 }, description: 结束 epoch millis }
+        - { name: step, in: query, schema: { type: integer, format: int64, default: 60 }, description: 降采样步长(秒) }
+      responses:
+        '200':
+          description: 降采样分桶点 (min/max/avg)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/HistoryPoint' }
+
+  # ==================== 总览大盘 ====================
+  /api/dashboard/summary:
+    get:
+      tags: [总览大盘]
+      summary: 大盘统计
+      description: 监控对象分类计数 + 活动告警级别分布 (PRD 06 /dashboard)。
+      responses:
+        '200':
+          description: 统计
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/DashboardSummary' }
+
+  # ==================== 告警中心 ====================
+  /api/alerts:
+    get:
+      tags: [告警中心]
+      summary: 分页查询告警
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [NORMAL, PENDING, TRIGGERED, NOTIFYING, ACKNOWLEDGED, RECOVERED, CLOSED] } }
+        - { name: monitorId, in: query, schema: { type: integer, format: int64 } }
+        - { name: severity, in: query, schema: { type: string, enum: [INFO, WARN, CRITICAL, FATAL] } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: size, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: 分页结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PageResultAlert' }
+
+  /api/alerts/active:
+    get:
+      tags: [告警中心]
+      summary: 值班视图 (未确认活动告警, 按级别降序常驻)
+      responses:
+        '200':
+          description: 活动告警列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Alert' }
+
+  /api/alerts/stats:
+    get:
+      tags: [告警中心]
+      summary: 告警级别分布统计
+      responses:
+        '200':
+          description: 各级别活动告警计数
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        additionalProperties: { type: integer, format: int64 }
+
+  /api/alerts/{alertNo}:
+    get:
+      tags: [告警中心]
+      summary: 告警详情
+      parameters: [ { $ref: '#/components/parameters/AlertNoPath' } ]
+      responses:
+        '200':
+          description: 详情
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultAlert' }
+
+  /api/alerts/{alertNo}/ack:
+    post:
+      tags: [告警中心]
+      summary: 确认告警 (记录操作人+时间, 写审计)
+      parameters: [ { $ref: '#/components/parameters/AlertNoPath' } ]
+      responses:
+        '200':
+          description: 已确认
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultAlert' }
+
+  /api/alerts/{alertNo}/silence:
+    post:
+      tags: [告警中心]
+      summary: 静默告警 (如静默1h)
+      parameters:
+        - { $ref: '#/components/parameters/AlertNoPath' }
+        - { name: seconds, in: query, schema: { type: integer, default: 3600 } }
+      responses:
+        '200':
+          description: 已静默
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultAlert' }
+
+  /api/alerts/{alertNo}/close:
+    post:
+      tags: [告警中心]
+      summary: 关闭告警
+      parameters: [ { $ref: '#/components/parameters/AlertNoPath' } ]
+      responses:
+        '200':
+          description: 已关闭
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  # ==================== 阈值规则 ====================
+  /api/alert-rules:
+    get:
+      tags: [阈值规则]
+      summary: 查询规则
+      parameters:
+        - { name: scope, in: query, schema: { type: string, enum: [GLOBAL, TYPE, INSTANCE, FIELD] } }
+        - { name: scopeRef, in: query, schema: { type: string, description: 作用域引用 (app_type 等) } }
+      responses:
+        '200':
+          description: 规则列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/ThresholdRule' }
+    post:
+      tags: [阈值规则]
+      summary: 新增/编辑规则 (保存即热加载生效)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ThresholdRule' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultThresholdRule' }
+
+  /api/alert-rules/effective:
+    get:
+      tags: [阈值规则]
+      summary: 查询某监控对象的生效规则 (含全局默认 + 实例覆写)
+      description: 优先级 实例级 > 类型级 > 全局模板 (PRD 04)。
+      parameters:
+        - { name: monitorId, in: query, required: true, schema: { type: integer, format: int64 } }
+        - { name: appType, in: query, required: true, schema: { type: string } }
+        - { name: group, in: query, schema: { type: string } }
+        - { name: field, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: 生效规则列表 (按优先级降序)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/ThresholdRule' }
+
+  /api/alert-rules/{id}:
+    get:
+      tags: [阈值规则]
+      summary: 查询单条规则
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 规则
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultThresholdRule' }
+    delete:
+      tags: [阈值规则]
+      summary: 删除规则
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/alert-rules/{id}/toggle:
+    put:
+      tags: [阈值规则]
+      summary: 启用/停用规则
+      parameters:
+        - { $ref: '#/components/parameters/IdPath' }
+        - { name: enabled, in: query, required: true, schema: { type: boolean } }
+      responses:
+        '200':
+          description: 已切换
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultThresholdRule' }
+
+  # ==================== 通知管理 ====================
+  /api/notifications/groups:
+    get:
+      tags: [通知管理]
+      summary: 收件人组列表
+      responses:
+        '200':
+          description: 收件人组
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/NotifyGroup' }
+    post:
+      tags: [通知管理]
+      summary: 新增/编辑收件人组
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotifyGroup' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotifyGroup' }
+
+  /api/notifications/groups/{id}:
+    delete:
+      tags: [通知管理]
+      summary: 删除收件人组
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/notifications/policies:
+    get:
+      tags: [通知管理]
+      summary: 通知策略列表
+      responses:
+        '200':
+          description: 通知策略
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/NotifyPolicy' }
+    post:
+      tags: [通知管理]
+      summary: 新增/编辑通知策略
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NotifyPolicy' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NotifyPolicy' }
+
+  /api/notifications/policies/{id}:
+    delete:
+      tags: [通知管理]
+      summary: 删除通知策略
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/notifications/test:
+    post:
+      tags: [通知管理]
+      summary: 发送测试邮件 (可观测性, PRD 05)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: 投递结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/NotifyResult' }
+
+  # ==================== 系统设置 ====================
+  /api/settings/smtp:
+    get:
+      tags: [系统设置]
+      summary: 获取 SMTP 配置 (授权码脱敏)
+      responses:
+        '200':
+          description: SMTP 配置
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id: { type: integer, format: int64 }
+                          host: { type: string }
+                          port: { type: integer }
+                          starttls: { type: boolean }
+                          sender: { type: string }
+                          authCipher: { type: string, description: 恒为 *** (脱敏) }
+                          enabled: { type: boolean }
+    post:
+      tags: [系统设置]
+      summary: 保存 SMTP 配置 (授权码 AES-256-GCM 加密)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                host: { type: string }
+                port: { type: integer, default: 465 }
+                starttls: { type: boolean, default: true }
+                sender: { type: string }
+                authCode: { type: string, description: 授权码明文 (服务端加密存储; 传 *** 表示不修改) }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/settings/collectors:
+    get:
+      tags: [系统设置]
+      summary: 采集器节点列表
+      responses:
+        '200':
+          description: 采集器节点
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/CollectorNode' }
+
+  /api/settings/users:
+    get:
+      tags: [系统设置]
+      summary: 用户列表 (口令哈希脱敏)
+      responses:
+        '200':
+          description: 用户列表
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            id: { type: integer, format: int64 }
+                            username: { type: string }
+                            displayName: { type: string }
+                            email: { type: string }
+                            enabled: { type: boolean }
+                            roles: { type: array, items: { type: string } }
+
+  /api/settings/users/{id}/toggle:
+    put:
+      tags: [系统设置]
+      summary: 启用/停用用户
+      parameters:
+        - { $ref: '#/components/parameters/IdPath' }
+        - { name: enabled, in: query, required: true, schema: { type: boolean } }
+      responses:
+        '200':
+          description: 已切换
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  /api/settings/users/{id}/reset-password:
+    put:
+      tags: [系统设置]
+      summary: 重置用户口令
+      parameters: [ { $ref: '#/components/parameters/IdPath' } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 已重置
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiResultVoid' }
+
+  # ==================== 审计日志 ====================
+  /api/audit:
+    get:
+      tags: [审计日志]
+      summary: 分页查询审计日志
+      parameters:
+        - { name: action, in: query, schema: { type: string, description: 'LOGIN/CONFIG_CHANGE/ALERT_ACK/...' } }
+        - { name: userId, in: query, schema: { type: integer, format: int64 } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: size, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        '200':
+          description: 分页结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiResultVoid'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/PageResultAuditLog' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    AlertNoPath:
+      name: alertNo
+      in: path
+      required: true
+      schema: { type: string, example: A-2317 }
+
+  schemas:
+    # ---- 包络 ----
+    ApiResultVoid:
+      type: object
+      properties:
+        code: { type: integer, description: '0成功; 非0业务错误码', example: 0 }
+        message: { type: string, example: ok }
+        data: { type: object, nullable: true }
+        timestamp: { type: integer, format: int64 }
+
+    ApiResultLoginResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResultVoid'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/LoginResponse' }
+
+    ApiResultMonitorView:
+      allOf:
+        - $ref: '#/components/schemas/ApiResultVoid'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/MonitorView' }
+
+    ApiResultAlert:
+      allOf:
+        - $ref: '#/components/schemas/ApiResultVoid'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Alert' }
+
+    ApiResultThresholdRule:
+      allOf:
+        - $ref: '#/components/schemas/ApiResultVoid'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/ThresholdRule' }
+
+    PageResultMonitorView:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/MonitorView' } }
+        total: { type: integer, format: int64 }
+        page: { type: integer }
+        size: { type: integer }
+
+    PageResultAlert:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+        total: { type: integer, format: int64 }
+        page: { type: integer }
+        size: { type: integer }
+
+    PageResultAuditLog:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/AuditLog' } }
+        total: { type: integer, format: int64 }
+        page: { type: integer }
+        size: { type: integer }
+
+    # ---- 认证 ----
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username: { type: string, description: 用户名/工号 }
+        password: { type: string, format: password }
+        captcha: { type: string, description: 验证码 (失败≥2次要求) }
+        captchaKey: { type: string }
+        rememberMe: { type: boolean, default: false, description: 记住我 (7天免登录) }
+
+    LoginResponse:
+      type: object
+      properties:
+        accessToken: { type: string }
+        tokenType: { type: string, example: Bearer }
+        expiresIn: { type: integer, format: int64, description: 访问令牌有效期(秒) }
+        refreshToken: { type: string, nullable: true, description: 记住我时下发 }
+        user: { $ref: '#/components/schemas/UserInfo' }
+
+    UserInfo:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        displayName: { type: string }
+        roles: { type: array, items: { type: string, enum: [ADMIN, OPERATOR, READONLY] } }
+
+    # ---- 监控对象 ----
+    MonitorRequest:
+      type: object
+      required: [name, appType, host, credential]
+      properties:
+        id: { type: integer, format: int64, description: 编辑时携带 }
+        name: { type: string }
+        appType: { type: string, enum: [linux, http, mysql, postgresql, oracle] }
+        host: { type: string, description: 地址/IP/URL }
+        port: { type: integer }
+        intervalSec: { type: integer, minimum: 15, maximum: 3600, default: 30 }
+        remark: { type: string }
+        tags: { type: array, items: { type: string }, example: ['env:prod', 'team:db'] }
+        credential:
+          type: object
+          description: 按协议的凭据明文 (服务端加密存储)
+          additionalProperties: { type: string }
+          example: { username: monitor, password: '***' }
+        extra:
+          type: object
+          description: HTTP 型额外参数 (endpoint/method 等)
+          additionalProperties: true
+
+    MonitorView:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        appType: { type: string }
+        protocol: { type: string, enum: [ssh, snmp, ipmi, http, jdbc] }
+        host: { type: string }
+        port: { type: integer }
+        intervalSec: { type: integer }
+        status: { type: integer, description: '0停用 1正常 2不可达' }
+        statusLabel: { type: string }
+        connFailCount: { type: integer }
+        lastCollectAt: { type: integer, format: int64, nullable: true }
+        remark: { type: string }
+        tags: { type: array, items: { type: string } }
+        credentialMasked:
+          type: object
+          additionalProperties: { type: string }
+          description: 脱敏凭据摘要 (仅类型/用户名, 不含密钥)
+        createTime: { type: integer, format: int64 }
+
+    Latest:
+      type: object
+      description: 实时值快照
+      properties:
+        group: { type: string }
+        field: { type: string }
+        doubleValue: { type: number, format: double, nullable: true }
+        strValue: { type: string, nullable: true }
+        unit: { type: string, nullable: true }
+        timestamp: { type: integer, format: int64 }
+        success: { type: boolean }
+        labels: { type: object, additionalProperties: { type: string }, nullable: true }
+
+    DashboardSummary:
+      type: object
+      properties:
+        monitorTotal: { type: integer, format: int64 }
+        monitorByType: { type: object, additionalProperties: { type: integer, format: int64 } }
+        monitorUnreachable: { type: integer, format: int64 }
+        activeAlertTotal: { type: integer, format: int64 }
+        activeAlertBySeverity: { type: object, additionalProperties: { type: integer, format: int64 } }
+
+    HistoryPoint:
+      type: object
+      description: 历史趋势降采样分桶点 (TSDB queryInterval 结果)
+      properties:
+        ts: { type: integer, format: int64, description: 分桶起始 epoch millis }
+        value: { type: number, format: double, nullable: true, description: 原始值 (queryRange) }
+        min: { type: number, format: double, nullable: true }
+        max: { type: number, format: double, nullable: true }
+        avg: { type: number, format: double, nullable: true }
+
+    # ---- 告警 ----
+    Alert:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        alertNo: { type: string, example: A-2317 }
+        monitorId: { type: integer, format: int64 }
+        metricFieldId: { type: integer, format: int64, nullable: true }
+        ruleId: { type: integer, format: int64, nullable: true }
+        metricGroup: { type: string }
+        fieldName: { type: string }
+        state: { type: string, enum: [NORMAL, PENDING, TRIGGERED, NOTIFYING, ACKNOWLEDGED, RECOVERED, CLOSED] }
+        severity: { type: string, enum: [INFO, WARN, CRITICAL, FATAL] }
+        currentValue: { type: string }
+        thresholdDesc: { type: string, example: '>= 30 s' }
+        hitCount: { type: integer }
+        firstTriggerAt: { type: string, format: date-time, nullable: true }
+        lastTriggerAt: { type: string, format: date-time, nullable: true }
+        ackBy: { type: integer, format: int64, nullable: true }
+        ackAt: { type: string, format: date-time, nullable: true }
+        recoveredAt: { type: string, format: date-time, nullable: true }
+        closedAt: { type: string, format: date-time, nullable: true }
+        notifyGroupId: { type: integer, format: int64, nullable: true }
+        silencedUntil: { type: string, format: date-time, nullable: true }
+        fingerprint: { type: string }
+
+    ThresholdRule:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        scope: { type: string, enum: [GLOBAL, TYPE, INSTANCE, FIELD] }
+        scopeRef: { type: string, nullable: true }
+        monitorId: { type: integer, format: int64, nullable: true }
+        metricFieldId: { type: integer, format: int64, nullable: true }
+        metricGroup: { type: string }
+        fieldName: { type: string }
+        operator: { type: string, enum: [GT, GE, LT, LE, EQ, NE, BETWEEN, DELTA_PCT] }
+        thresholdJson: { type: string, description: 'JSON: {value} / {min,max} / {baselineWindowSec,pct,direction}', example: '{"value":85}' }
+        consecutiveN: { type: integer, default: 3 }
+        windowSec: { type: integer, default: 300 }
+        severity: { type: string, enum: [INFO, WARN, CRITICAL, FATAL] }
+        effectivePeriod: { type: string, enum: [ALL_DAY, WORK, CRON] }
+        cronExpr: { type: string, nullable: true }
+        suppressSec: { type: integer, default: 600 }
+        recoveryNotify: { type: boolean, default: true }
+        notifyPolicyId: { type: integer, format: int64, nullable: true }
+        enabled: { type: boolean, default: true }
+        priority: { type: integer, default: 0 }
+
+    NotifyGroup:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string, example: 数据库值班 }
+        membersJson: { type: string, description: 'JSON: [{name,email}]', example: '[{"name":"dba","email":"dba@example.com"}]' }
+        description: { type: string }
+        enabled: { type: boolean }
+
+    NotifyPolicy:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        name: { type: string }
+        matchTagsJson: { type: string, nullable: true, example: '{"env":"prod"}' }
+        matchSeverity: { type: string, nullable: true, description: 逗号分隔级别, 空=全部, example: 'CRITICAL,FATAL' }
+        notifyGroupId: { type: integer, format: int64 }
+        enabled: { type: boolean }
+        priority: { type: integer }
+
+    NotifyResult:
+      type: object
+      properties:
+        success: { type: boolean }
+        messageId: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+
+    CollectorNode:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        identity: { type: string }
+        mode: { type: string, enum: [public, private] }
+        host: { type: string }
+        port: { type: integer }
+        status: { type: integer, description: '0离线 1在线' }
+        instanceCnt: { type: integer }
+        lastHeartbeat: { type: string, format: date-time, nullable: true }
+
+    AuditLog:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        userId: { type: integer, format: int64, nullable: true }
+        username: { type: string }
+        action: { type: string }
+        targetType: { type: string, nullable: true }
+        targetId: { type: string, nullable: true }
+        detailJson: { type: string, nullable: true, description: 脱敏后的变更详情 }
+        ip: { type: string, nullable: true }
+        userAgent: { type: string, nullable: true }
+        success: { type: boolean }
+        createTime: { type: string, format: date-time }

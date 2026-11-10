@@ -1,0 +1,25 @@
+# =====================================================================
+# 望哨 WATCHPOST · 后端运行镜像 (瘦镜像: 直接 COPY 预构建 jar, 不在服务器跑 Maven)
+# 构建上下文 = 工程根目录; jar 置于根目录 watchpost.jar
+# 基础镜像 eclipse-temurin:21-jre-alpine 已通过 registry-mirror 拉取到本地
+# =====================================================================
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+
+# wget: 健康检查; tzdata: 时区; ipmitool/net-snmp-tools: IPMI/SNMP 带外降级采集兜底
+RUN apk add --no-cache wget tzdata ipmitool net-snmp-tools \
+    && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
+
+# 非 root 运行 (安全基线)
+RUN addgroup -S watchpost && adduser -S watchpost -G watchpost
+COPY watchpost.jar /app/watchpost.jar
+RUN chown -R watchpost:watchpost /app
+USER watchpost
+
+EXPOSE 1157
+ENV JAVA_OPTS="-Xms512m -Xmx1024m -XX:+UseContainerSupport -XX:MaxRAMPercentage=75"
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -jar /app/watchpost.jar"]
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=12 --start-period=60s \
+    CMD wget -qO- http://localhost:1157/actuator/health || exit 1
